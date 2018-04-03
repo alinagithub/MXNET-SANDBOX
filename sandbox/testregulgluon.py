@@ -1,11 +1,10 @@
 from __future__ import print_function
 import mxnet as mx
-import mxnet.ndarray as nd
 from mxnet import autograd
+from mxnet import gluon
+import mxnet.ndarray as nd
 import numpy as np
 ctx = mx.cpu()
-mx.random.seed(1)
-
 
 # for plotting purposes
 #%matplotlib inline
@@ -24,41 +23,28 @@ test_data = mx.gluon.data.DataLoader(
                                mnist["test_label"][:num_examples].astype(np.float32)),
                                batch_size, shuffle=False)
 
-W = nd.random_normal(shape=(784,10))
-b = nd.random_normal(shape=10)
+net = gluon.nn.Sequential()
+with net.name_scope():
+    net.add(gluon.nn.Dense(10))
 
-params = [W, b]
+net.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=ctx)
 
-for param in params:
-    param.attach_grad()
+loss = gluon.loss.SoftmaxCrossEntropyLoss()
 
-def net(X):
-    y_linear = nd.dot(X, W) + b
-    yhat = nd.softmax(y_linear, axis=1)
-    return yhat
+trainer = gluon.Trainer(net.collect_params(), 'sgd', {'learning_rate': 0.01, 'wd': 0.0})
 
-def cross_entropy(yhat, y):
-    return - nd.sum(y * nd.log(yhat), axis=0, exclude=True)
-
-def SGD(params, lr):
-    for param in params:
-        param[:] = param - lr * param.grad
-
-def evaluate_accuracy(data_iterator, net):
-    numerator = 0.
-    denominator = 0.
+def evaluate_accuracy(data_iterator, net, loss_fun):
+    acc = mx.metric.Accuracy()
     loss_avg = 0.
     for i, (data, label) in enumerate(data_iterator):
         data = data.as_in_context(ctx).reshape((-1,784))
         label = label.as_in_context(ctx)
-        label_one_hot = nd.one_hot(label, 10)
         output = net(data)
-        loss = cross_entropy(output, label_one_hot)
+        loss = loss_fun(output, label)
         predictions = nd.argmax(output, axis=1)
-        numerator += nd.sum(predictions == label)
-        denominator += data.shape[0]
+        acc.update(preds=predictions, labels=label)
         loss_avg = loss_avg*i/(i+1) + nd.mean(loss).asscalar()/(i+1)
-    return (numerator / denominator).asscalar(), loss_avg
+    return acc.get()[1], loss_avg
 
 def plot_learningcurves(loss_tr,loss_ts, acc_tr,acc_ts):
     xs = list(range(len(loss_tr)))
@@ -84,7 +70,7 @@ def plot_learningcurves(loss_tr,loss_ts, acc_tr,acc_ts):
 
     plt.show()
 
-epochs = 1000
+epochs = 700
 moving_loss = 0.
 niter=0
 
@@ -93,27 +79,25 @@ loss_seq_test = []
 acc_seq_train = []
 acc_seq_test = []
 
-
 for e in range(epochs):
     for i, (data, label) in enumerate(train_data):
         data = data.as_in_context(ctx).reshape((-1,784))
         label = label.as_in_context(ctx)
-        label_one_hot = nd.one_hot(label, 10)
         with autograd.record():
             output = net(data)
-            loss = nd.sum(cross_entropy(output, label_one_hot))
-        loss.backward()
-        SGD(params, .001)
+            cross_entropy = loss(output, label)
+        cross_entropy.backward()
+        trainer.step(data.shape[0])
 
         ##########################
         #  Keep a moving average of the losses
         ##########################
         niter +=1
-        moving_loss = .99 * moving_loss + .01 * nd.mean(loss).asscalar()
+        moving_loss = .99 * moving_loss + .01 * nd.mean(cross_entropy).asscalar()
         est_loss = moving_loss/(1-0.99**niter)
 
-    test_accuracy, test_loss = evaluate_accuracy(test_data, net)
-    train_accuracy, train_loss = evaluate_accuracy(train_data, net)
+    test_accuracy, test_loss = evaluate_accuracy(test_data, net, loss)
+    train_accuracy, train_loss = evaluate_accuracy(train_data, net, loss)
 
     # save them for later
     loss_seq_train.append(train_loss)
@@ -122,57 +106,43 @@ for e in range(epochs):
     acc_seq_test.append(test_accuracy)
 
 
-    if e % 100 == 99:
+    if e % 20 == 0:
         print("Completed epoch %s. Train Loss: %s, Test Loss %s, Train_acc %s, Test_acc %s" %
               (e+1, train_loss, test_loss, train_accuracy, test_accuracy))
-
 
 ## Plotting the learning curves
 plot_learningcurves(loss_seq_train,loss_seq_test,acc_seq_train,acc_seq_test)
 
 
-def l2_penalty(params):
-    penalty = nd.zeros(shape=1)
-    for param in params:
-        penalty = penalty + nd.sum(param ** 2)
-    return penalty
+net.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=ctx, force_reinit=True)
+trainer = gluon.Trainer(net.collect_params(), 'sgd', {'learning_rate': 0.01, 'wd': 0.001})
 
-
-for param in params:
-    param[:] = nd.random_normal(shape=param.shape)
-
-epochs = 1000
 moving_loss = 0.
-l2_strength = .1
 niter=0
-
 loss_seq_train = []
 loss_seq_test = []
 acc_seq_train = []
 acc_seq_test = []
 
-
 for e in range(epochs):
     for i, (data, label) in enumerate(train_data):
         data = data.as_in_context(ctx).reshape((-1,784))
         label = label.as_in_context(ctx)
-        label_one_hot = nd.one_hot(label, 10)
         with autograd.record():
             output = net(data)
-            loss = nd.sum(cross_entropy(output, label_one_hot)) + l2_strength * l2_penalty(params)
-        loss.backward()
-        SGD(params, .001)
+            cross_entropy = loss(output, label)
+        cross_entropy.backward()
+        trainer.step(data.shape[0])
 
         ##########################
         #  Keep a moving average of the losses
         ##########################
         niter +=1
-        moving_loss = .99 * moving_loss + .01 * nd.mean(loss).asscalar()
+        moving_loss = .99 * moving_loss + .01 * nd.mean(cross_entropy).asscalar()
         est_loss = moving_loss/(1-0.99**niter)
 
-
-    test_accuracy, test_loss = evaluate_accuracy(test_data, net)
-    train_accuracy, train_loss = evaluate_accuracy(train_data, net)
+    test_accuracy, test_loss = evaluate_accuracy(test_data, net,loss)
+    train_accuracy, train_loss = evaluate_accuracy(train_data, net, loss)
 
     # save them for later
     loss_seq_train.append(train_loss)
@@ -180,10 +150,9 @@ for e in range(epochs):
     acc_seq_train.append(train_accuracy)
     acc_seq_test.append(test_accuracy)
 
-    if e % 100 == 99:
+    if e % 20 == 0:
         print("Completed epoch %s. Train Loss: %s, Test Loss %s, Train_acc %s, Test_acc %s" %
               (e+1, train_loss, test_loss, train_accuracy, test_accuracy))
-
 
 ## Plotting the learning curves
 plot_learningcurves(loss_seq_train,loss_seq_test,acc_seq_train,acc_seq_test)
